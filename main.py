@@ -2,17 +2,18 @@ import cv2
 import numpy as np
 import qrcode
 import base64
+import subprocess
+import sys
+import threading
+from queue import Queue, Empty
 
-cap = cv2.VideoCapture(0)
-detector = cv2.QRCodeDetector()
-
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+scanner_proc = None
+qr_queue = Queue()
 
 MAX_SIZE = 300
 SAVE_EVERY = 10
 
-MODE = "send"
+MODE = "receive"
 INPUT = "shrek.txt"
 OUTPUT = "output"
 
@@ -36,20 +37,45 @@ def chunk(data, size):
         seq += 1
 
 
+def enqueue_output(out, queue):
+    try:
+        for line in iter(out.readline, ''):
+            if not line:
+                break
+            queue.put(line)
+    except Exception:
+        pass
+    finally:
+        out.close()
+
+
 def read_frame():
+    global scanner_proc
+    if scanner_proc is None:
+        scanner_proc = subprocess.Popen(
+            ['./qr_scanner'],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            bufsize=1
+        )
+        t = threading.Thread(target=enqueue_output, args=(scanner_proc.stdout, qr_queue))
+        t.daemon = True
+        t.start()
+    
     while True:
-        ret, frame = cap.read()
-        if not ret:
-            continue
-
+        if scanner_proc.poll() is not None:
+            raise RuntimeError("QR Scanner subprocess exited unexpectedly")
         try:
-            data, _, _ = detector.detectAndDecode(frame)
-        except cv2.error:
-            continue
-
-        if data:
-            print(data)
-            return data
+            line = qr_queue.get_nowait()
+            data = line.strip()
+            if data:
+                print(data)
+                return data
+        except Empty:
+            cv2.waitKey(1)
+            import time
+            time.sleep(0.01)
 
 
 def wait_for_type(frame_type):
@@ -147,5 +173,7 @@ elif MODE == "receive":
         with open(temp_file, "rb") as inp:
             out.write(inp.read())
 
-cap.release()
+if scanner_proc is not None:
+    scanner_proc.terminate()
+    scanner_proc.wait()
 cv2.destroyAllWindows()
